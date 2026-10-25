@@ -13,6 +13,10 @@
     "build": {
       "name": "Build Debug APK",
       "runs-on": "ubuntu-latest",
+      "env": {
+        "ANDROID_HOME": "/usr/local/lib/android/sdk",
+        "ANDROID_SDK_ROOT": "/usr/local/lib/android/sdk"
+      },
       "steps": [
         {
           "name": "Checkout user overlay repo",
@@ -32,10 +36,6 @@
             "distribution": "temurin",
             "java-version": "17"
           }
-        },
-        {
-          "name": "Set up Android SDK",
-          "uses": "android-actions/setup-android@v3"
         },
         {
           "name": "Install pnpm",
