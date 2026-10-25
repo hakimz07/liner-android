@@ -58,6 +58,11 @@
           "run": "printf \"packages:\\n  - '.'\\nallowBuilds:\\n  electron-winstaller: true\\n\" > pnpm-workspace.yaml\npnpm install --no-frozen-lockfile\npnpm add -w -D @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0\n"
         },
         {
+          "name": "Patch search hooks for null-safety",
+          "working-directory": "upstream-src",
+          "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\"); const hooksDir = \"src/features/search/hooks\"; if (fs.existsSync(hooksDir)) { fs.readdirSync(hooksDir).forEach(f => { const fp = path.join(hooksDir, f); let c = fs.readFileSync(fp, \"utf8\"); c = c.replace(/setItems\\(res\\.items\\);/g, \"setItems(Array.isArray(res?.items) ? res.items : []);\"); c = c.replace(/\\[items\\.length,/g, \"[(items || []).length,\"); c = c.replace(/res\\.items\\.filter/g, \"(Array.isArray(res?.items) ? res.items : []).filter\"); c = c.replace(/tracks\\.length/g, \"(tracks || []).length\"); fs.writeFileSync(fp, c); console.log(\"Patched search hook:\", f); }); }'"
+        },
+        {
           "name": "Build web bundle with mobile config",
           "working-directory": "upstream-src",
           "run": "pnpm exec vite build --config vite.config.mobile.ts"
@@ -73,7 +78,7 @@
           "run": "node -e 'const fs = require(\"fs\"); const p = \"app/src/main/AndroidManifest.xml\"; let xml = fs.readFileSync(p, \"utf8\"); const perms = \"\\n    <uses-permission android:name=\\\"android.permission.INTERNET\\\" />\\n    <uses-permission android:name=\\\"android.permission.ACCESS_NETWORK_STATE\\\" />\\n    <uses-permission android:name=\\\"android.permission.WAKE_LOCK\\\" />\\n    <uses-permission android:name=\\\"android.permission.FOREGROUND_SERVICE\\\" />\\n    <uses-permission android:name=\\\"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK\\\" />\"; if (!xml.includes(\"INTERNET\")) xml = xml.replace(\"<application\", perms + \"\\n    <application\"); fs.writeFileSync(p, xml); console.log(\"Android manifest patched\");'"
         },
         {
-          "name": "Assemble Debug APK via Gradle",
+          "name": "Build Debug APK via Gradle",
           "working-directory": "upstream-src/android",
           "run": "chmod +x gradlew && ./gradlew assembleDebug --no-daemon"
         },
