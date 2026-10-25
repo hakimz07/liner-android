@@ -55,7 +55,7 @@
         {
           "name": "Configure pnpm workspace & install dependencies",
           "working-directory": "upstream-src",
-          "run": "printf \"packages:\\n  - '.'\\nallowBuilds:\\n  electron-winstaller: true\\n\" > pnpm-workspace.yaml\npnpm install --no-frozen-lockfile\npnpm add -D @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0\n"
+          "run": "printf \"packages:\\n  - '.'\\nallowBuilds:\\n  electron-winstaller: true\\n\" > pnpm-workspace.yaml\npnpm install --no-frozen-lockfile\npnpm add -w -D @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0\n"
         },
         {
           "name": "Build web bundle with mobile config",
