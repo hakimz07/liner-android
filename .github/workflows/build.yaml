@@ -1,22 +1,92 @@
 {
-"name": "Android debug APK",
-"on": {"workflow_dispatch": {}},
-"jobs": {"apk": {
-"runs-on": "ubuntu-latest",
-"env": {"ELECTRON_SKIP_BINARY_DOWNLOAD": "1"},
-"steps": [
-{"uses": "actions/checkout@v4", "with": {"path": "overlay"}},
-{"uses": "actions/checkout@v4", "with": {"repository": "hakimz07/desktop", "ref": "main", "path": "app"}},
-{"run": "cp -r overlay/src/android app/src/android && cp overlay/vite.android.config.ts overlay/capacitor.config.json app/"},
-{"uses": "pnpm/action-setup@v4", "with": {"version": 10}},
-{"uses": "actions/setup-node@v4", "with": {"node-version": 22}},
-{"uses": "actions/setup-java@v4", "with": {"distribution": "temurin", "java-version": 21}},
-{"uses": "android-actions/setup-android@v3"},
-{"working-directory": "app", "run": "pnpm install --no-frozen-lockfile --ignore-scripts && pnpm add -D @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 --ignore-scripts"},
-{"working-directory": "app", "run": "sed -i '1i import \"./android/bootstrap\";' src/main.tsx"},
-{"working-directory": "app", "run": "pnpm exec vite build --config vite.android.config.ts"},
-{"working-directory": "app", "run": "pnpm exec cap add android && pnpm exec cap sync android"},
-{"working-directory": "app/android", "run": "./gradlew assembleDebug --no-daemon"},
-{"uses": "actions/upload-artifact@v4", "with": {"name": "app-debug-apk", "path": "app/android/app/build/outputs/apk/debug/app-debug.apk", "retention-days": 7}}
-]}}
+  "name": "Build Liner Android APK",
+  "on": {
+    "workflow_dispatch": {},
+    "push": {
+      "branches": [
+        "main",
+        "master"
+      ]
+    }
+  },
+  "jobs": {
+    "build": {
+      "name": "Build Debug APK",
+      "runs-on": "ubuntu-latest",
+      "steps": [
+        {
+          "name": "Checkout user overlay repo",
+          "uses": "actions/checkout@v4"
+        },
+        {
+          "name": "Set up Node.js 20",
+          "uses": "actions/setup-node@v4",
+          "with": {
+            "node-version": 20
+          }
+        },
+        {
+          "name": "Set up Java 17",
+          "uses": "actions/setup-java@v4",
+          "with": {
+            "distribution": "temurin",
+            "java-version": "17"
+          }
+        },
+        {
+          "name": "Set up Android SDK",
+          "uses": "android-actions/setup-android@v3"
+        },
+        {
+          "name": "Install pnpm",
+          "uses": "pnpm/action-setup@v4",
+          "with": {
+            "version": 9
+          }
+        },
+        {
+          "name": "Clone upstream Liner source",
+          "run": "git clone --depth 1 https://github.com/hakimz07/desktop.git upstream-src"
+        },
+        {
+          "name": "Apply overlay files to upstream",
+          "run": "mkdir -p upstream-src/src/android\nif [ -d \"overlay\" ]; then cp -rf overlay/* upstream-src/; fi\nif [ -f \"capacitor.config.json\" ]; then cp -f capacitor.config.json upstream-src/; fi\n"
+        },
+        {
+          "name": "Install project dependencies & Capacitor",
+          "working-directory": "upstream-src",
+          "run": "pnpm install --no-frozen-lockfile && pnpm add -D @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0"
+        },
+        {
+          "name": "Build web bundle with mobile config",
+          "working-directory": "upstream-src",
+          "run": "pnpm exec vite build --config vite.config.mobile.ts"
+        },
+        {
+          "name": "Capacitor add Android & sync",
+          "working-directory": "upstream-src",
+          "run": "npx cap add android || true\nnpx cap sync android\n"
+        },
+        {
+          "name": "Configure Android Manifest permissions",
+          "working-directory": "upstream-src/android",
+          "run": "node -e 'const fs = require(\"fs\"); const p = \"app/src/main/AndroidManifest.xml\"; let xml = fs.readFileSync(p, \"utf8\"); const perms = \"\\n    <uses-permission android:name=\\\"android.permission.INTERNET\\\" />\\n    <uses-permission android:name=\\\"android.permission.ACCESS_NETWORK_STATE\\\" />\\n    <uses-permission android:name=\\\"android.permission.WAKE_LOCK\\\" />\\n    <uses-permission android:name=\\\"android.permission.FOREGROUND_SERVICE\\\" />\\n    <uses-permission android:name=\\\"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK\\\" />\"; if (!xml.includes(\"INTERNET\")) xml = xml.replace(\"<application\", perms + \"\\n    <application\"); fs.writeFileSync(p, xml); console.log(\"Android manifest patched\");'"
+        },
+        {
+          "name": "Assemble Debug APK via Gradle",
+          "working-directory": "upstream-src/android",
+          "run": "chmod +x gradlew && ./gradlew assembleDebug --no-daemon"
+        },
+        {
+          "name": "Upload APK Artifact",
+          "uses": "actions/upload-artifact@v4",
+          "with": {
+            "name": "liner-debug-apk",
+            "path": "upstream-src/android/app/build/outputs/apk/debug/app-debug.apk",
+            "if-no-files-found": "error"
+          }
+        }
+      ]
+    }
+  }
 }
