@@ -1,0 +1,52 @@
+name: Build APK from tarball
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract build kit
+        run: tar xzf liner-android-buildkit.tar.gz
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        run: npm i -g pnpm
+
+      - name: Install deps + build web bundle
+        working-directory: liner-desktop
+        run: |
+          ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --ignore-scripts
+          npx vite build --config vite.mobile.config.ts
+
+      - name: Use compileSdk 36
+        run: |
+          sed -i 's/compileSdkVersion = 35/compileSdkVersion = 36/; s/targetSdkVersion = 35/targetSdkVersion = 36/' liner-mobile/android/variables.gradle
+          yes | sdkmanager --install "platforms;android-36" "build-tools;36.0.0" >/dev/null 2>&1 || true
+
+      - name: Capacitor sync + build APK
+        run: |
+          cd liner-mobile
+          npm install && npm install -D typescript
+          rm -rf www && mkdir www && cp -r ../liner-desktop/dist-mobile/. www/
+          npx cap sync android
+          cd android
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon -x lint
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: liner-mobile-apk
+          path: liner-mobile/android/app/build/outputs/apk/debug/app-debug.apk
