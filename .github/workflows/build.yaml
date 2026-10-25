@@ -1,52 +1,49 @@
-name: Build APK from tarball
-on: [push, workflow_dispatch]
+name: Android debug APK
+on:
+workflow_dispatch:
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-    steps:
-      - uses: actions/checkout@v4
+apk:
+runs-on: ubuntu-latest
+env:
+ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+steps:
+- uses: actions/checkout@v4
+- uses: pnpm/action-setup@v4
+with:
+version: 10
+- uses: actions/setup-node@v4
+with:
+node-version: 22
+cache: pnpm
+- uses: actions/setup-java@v4
+with:
+distribution: temurin
+java-version: 21
+- uses: android-actions/setup-android@v3
 
-      - name: Extract build kit
-        run: tar xzf liner-android-buildkit.tar.gz
+- name: Install dependencies
+run: |
+pnpm install --no-frozen-lockfile --ignore-scripts
+pnpm add -D @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 --ignore-scripts
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
+- name: Load the Android bridge before the app starts
+run: sed -i '1i import "./android/bootstrap";' src/main.tsx
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+- name: Build web assets
+run: pnpm exec vite build --config vite.android.config.ts
 
-      - name: Install pnpm
-        run: npm i -g pnpm
+- name: Create and sync the Android project
+run: |
+pnpm exec cap add android
+pnpm exec cap sync android
 
-      - name: Install deps + build web bundle
-        working-directory: liner-desktop
-        run: |
-          ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --ignore-scripts
-          npx vite build --config vite.mobile.config.ts
+- name: Build debug APK
+working-directory: android
+run: ./gradlew assembleDebug --no-daemon
 
-      - name: Use compileSdk 36
-        run: |
-          sed -i 's/compileSdkVersion = 35/compileSdkVersion = 36/; s/targetSdkVersion = 35/targetSdkVersion = 36/' liner-mobile/android/variables.gradle
-          yes | sdkmanager --install "platforms;android-36" "build-tools;36.0.0" >/dev/null 2>&1 || true
-
-      - name: Capacitor sync + build APK
-        run: |
-          cd liner-mobile
-          npm install && npm install -D typescript
-          rm -rf www && mkdir www && cp -r ../liner-desktop/dist-mobile/. www/
-          npx cap sync android
-          cd android
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon -x lint
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: liner-mobile-apk
-          path: liner-mobile/android/app/build/outputs/apk/debug/app-debug.apk
+- uses: actions/upload-artifact@v4
+with:
+name: app-debug-apk
+path: android/app/build/outputs/apk/debug/app-debug.apk
+retention-days: 7
