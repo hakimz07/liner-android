@@ -1,49 +1,22 @@
-name: Android debug APK
-on:
-workflow_dispatch:
-
-jobs:
-apk:
-runs-on: ubuntu-latest
-env:
-ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-steps:
-- uses: actions/checkout@v4
-- uses: pnpm/action-setup@v4
-with:
-version: 10
-- uses: actions/setup-node@v4
-with:
-node-version: 22
-cache: pnpm
-- uses: actions/setup-java@v4
-with:
-distribution: temurin
-java-version: 21
-- uses: android-actions/setup-android@v3
-
-- name: Install dependencies
-run: |
-pnpm install --no-frozen-lockfile --ignore-scripts
-pnpm add -D @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 --ignore-scripts
-
-- name: Load the Android bridge before the app starts
-run: sed -i '1i import "./android/bootstrap";' src/main.tsx
-
-- name: Build web assets
-run: pnpm exec vite build --config vite.android.config.ts
-
-- name: Create and sync the Android project
-run: |
-pnpm exec cap add android
-pnpm exec cap sync android
-
-- name: Build debug APK
-working-directory: android
-run: ./gradlew assembleDebug --no-daemon
-
-- uses: actions/upload-artifact@v4
-with:
-name: app-debug-apk
-path: android/app/build/outputs/apk/debug/app-debug.apk
-retention-days: 7
+{
+"name": "Android debug APK",
+"on": {"workflow_dispatch": {}},
+"jobs": {"apk": {
+"runs-on": "ubuntu-latest",
+"env": {"ELECTRON_SKIP_BINARY_DOWNLOAD": "1"},
+"steps": [
+{"uses": "actions/checkout@v4", "with": {"path": "overlay"}},
+{"uses": "actions/checkout@v4", "with": {"repository": "hakimz07/desktop", "ref": "main", "path": "app"}},
+{"run": "cp -r overlay/src/android app/src/android && cp overlay/vite.android.config.ts overlay/capacitor.config.json app/"},
+{"uses": "pnpm/action-setup@v4", "with": {"version": 10}},
+{"uses": "actions/setup-node@v4", "with": {"node-version": 22}},
+{"uses": "actions/setup-java@v4", "with": {"distribution": "temurin", "java-version": 21}},
+{"uses": "android-actions/setup-android@v3"},
+{"working-directory": "app", "run": "pnpm install --no-frozen-lockfile --ignore-scripts && pnpm add -D @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 --ignore-scripts"},
+{"working-directory": "app", "run": "sed -i '1i import \"./android/bootstrap\";' src/main.tsx"},
+{"working-directory": "app", "run": "pnpm exec vite build --config vite.android.config.ts"},
+{"working-directory": "app", "run": "pnpm exec cap add android && pnpm exec cap sync android"},
+{"working-directory": "app/android", "run": "./gradlew assembleDebug --no-daemon"},
+{"uses": "actions/upload-artifact@v4", "with": {"name": "app-debug-apk", "path": "app/android/app/build/outputs/apk/debug/app-debug.apk", "retention-days": 7}}
+]}}
+}
