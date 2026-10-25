@@ -53,9 +53,9 @@
           "run": "mkdir -p upstream-src/src/android\nif [ -d \"overlay\" ]; then cp -rf overlay/* upstream-src/; fi\nif [ -f \"capacitor.config.json\" ]; then cp -f capacitor.config.json upstream-src/; fi\n"
         },
         {
-          "name": "Install project dependencies & Capacitor",
+          "name": "Configure pnpm workspace & install dependencies",
           "working-directory": "upstream-src",
-          "run": "pnpm install --no-frozen-lockfile && pnpm add -D @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0"
+          "run": "printf \"packages:\\n  - '.'\\nallowBuilds:\\n  electron-winstaller: true\\n\" > pnpm-workspace.yaml\npnpm install --no-frozen-lockfile\npnpm add -D @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0\n"
         },
         {
           "name": "Build web bundle with mobile config",
