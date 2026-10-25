@@ -1,0 +1,142 @@
+/* =========================================================================
+   Liner Mobile & Smartphone DPI Responsive Overrides
+   Reconstructs the Electron desktop player into an Android smartphone layout
+   ========================================================================= */
+
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 16px);
+  --mobile-nav-height: 62px;
+  --mobile-miniplayer-height: 58px;
+}
+
+html, body, #root {
+  width: 100% !important;
+  height: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+/* 1. Hide Desktop Window Controls on Android */
+.is-android-app [data-window-controls],
+.is-android-app [key="fullscreen-window-controls"],
+.is-android-app button[aria-label="Minimize"],
+.is-android-app button[aria-label="Maximize"],
+.is-android-app button[aria-label="Close"],
+.is-android-app [data-drag="true"] {
+  display: none !important;
+}
+
+/* 2. Responsive Smartphone Shell (width <= 768px or is-mobile-app) */
+@media (max-width: 768px), (pointer: coarse) {
+  body {
+    padding: 0 !important;
+  }
+
+  /* Header adjustments */
+  header, [key="app-header-container"] {
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    padding-top: max(8px, var(--safe-top)) !important;
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+    height: calc(48px + var(--safe-top)) !important;
+  }
+
+  /* Hide Desktop vertical left sidebar on mobile */
+  aside.w-\[58px\],
+  aside:has(nav.flex-col) {
+    display: none !important;
+  }
+
+  /* Main scroll area adjustments */
+  main {
+    --page-inset-top: calc(52px + var(--safe-top)) !important;
+    --page-inset-bottom: calc(var(--mobile-nav-height) + var(--mobile-miniplayer-height) + var(--safe-bottom) + 8px) !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+    padding-bottom: var(--page-inset-bottom) !important;
+  }
+
+  /* Right Drawer (Queue / Lyrics) on mobile: transform to Fullscreen Bottom Sheet */
+  [key="right-drawer"],
+  aside:has([data-drawer="right"]) {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    top: 0 !important;
+    bottom: calc(var(--mobile-nav-height) + var(--safe-bottom)) !important;
+    left: 0 !important;
+    right: 0 !important;
+    z-index: 65 !important;
+    border-radius: 20px 20px 0 0 !important;
+    background: rgba(18, 18, 22, 0.95) !important;
+    backdrop-filter: blur(24px) !important;
+    box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.6) !important;
+  }
+
+  /* Mobile Mini Player positioning */
+  div:has(> [data-mini-player]),
+  [data-mini-player-container] {
+    position: fixed !important;
+    left: 8px !important;
+    right: 8px !important;
+    bottom: calc(var(--mobile-nav-height) + var(--safe-bottom) + 4px) !important;
+    width: calc(100vw - 16px) !important;
+    max-width: 500px !important;
+    margin: 0 auto !important;
+    z-index: 55 !important;
+    border-radius: 14px !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45) !important;
+  }
+
+  /* Fullscreen Player Mobile Adaptation */
+  [key="fullscreen-player-overlay"] {
+    padding-top: var(--safe-top) !important;
+    padding-bottom: max(16px, var(--safe-bottom)) !important;
+  }
+
+  /* Search Island on Mobile */
+  [key="search-popup-wrapper"] {
+    left: 0 !important;
+    right: 0 !important;
+    top: 0 !important;
+    width: 100vw !important;
+    padding: var(--safe-top) 8px 0 8px !important;
+  }
+
+  [key="search-popup-wrapper"] > div,
+  [key="search-results-island"],
+  [key="search-history-island"] {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  /* Modals: Mobile bottom sheet behavior */
+  [role="dialog"] {
+    width: calc(100vw - 16px) !important;
+    max-width: 440px !important;
+    border-radius: 20px !important;
+  }
+
+  /* Enforce touch target minimum size (44px) */
+  button, a {
+    min-height: 40px;
+    touch-action: manipulation;
+  }
+
+  /* Grid listings responsive count on small screens */
+  .grid-cols-4,
+  .grid-cols-5,
+  .grid-cols-6 {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 12px !important;
+  }
+}
