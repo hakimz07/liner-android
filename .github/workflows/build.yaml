@@ -1,107 +1,314 @@
-{
-  "name": "Build Liner Android APK",
-  "on": {
-    "workflow_dispatch": {},
-    "push": {
-      "branches": [
-        "main",
-        "master"
-      ]
-    }
-  },
-  "jobs": {
-    "build": {
-      "name": "Build Debug APK",
-      "runs-on": "ubuntu-latest",
-      "env": {
-        "ANDROID_HOME": "/usr/local/lib/android/sdk",
-        "ANDROID_SDK_ROOT": "/usr/local/lib/android/sdk"
-      },
-      "steps": [
-        {
-          "name": "Checkout user overlay repo",
-          "uses": "actions/checkout@v4"
-        },
-        {
-          "name": "Set up Node.js 20",
-          "uses": "actions/setup-node@v4",
-          "with": {
-            "node-version": 20
+name: Build Liner Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
+    steps:
+      - name: Checkout user overlay repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Clone upstream Liner source
+        run: git clone --depth 1 https://github.com/tryliner/desktop.git upstream-src
+
+      - name: Apply overlay files to upstream
+        run: |
+          mkdir -p upstream-src/src/android
+          if [ -d "overlay" ]; then cp -rf overlay/* upstream-src/; fi
+          if [ -f "capacitor.config.json" ]; then cp -f capacitor.config.json upstream-src/; fi
+
+      - name: Configure pnpm workspace & install dependencies
+        working-directory: upstream-src
+        run: |
+          printf "packages:\n  - '.'\nallowBuilds:\n  electron-winstaller: true\n" > pnpm-workspace.yaml
+          pnpm install --no-frozen-lockfile
+          pnpm add -w @capacitor/core@^6.0.0
+          pnpm add -w -D @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0
+
+      - name: Ensure mobile config, Android bridge & in-app log viewer
+        working-directory: upstream-src
+        run: |
+          node -e 'const fs = require("fs"); const path = require("path");
+          // 1. Ensure capacitor.config.json has CapacitorHttp enabled
+          const capCfg = {
+            appId: "com.hkamori.liner",
+            appName: "Liner",
+            webDir: "dist",
+            server: { androidScheme: "https", cleartext: true },
+            android: { allowMixedContent: true },
+            plugins: { CapacitorHttp: { enabled: true } }
+          };
+          fs.writeFileSync("capacitor.config.json", JSON.stringify(capCfg, null, 2));
+          console.log("Wrote capacitor.config.json with CapacitorHttp enabled");
+
+          // 2. Ensure vite.config.mobile.ts exists and imports ./vite.csp.ts with extension
+          const mobileVite = `import { defineConfig } from "vite";
+          import react from "@vitejs/plugin-react";
+          import tailwindcss from "@tailwindcss/vite";
+          import path from "path";
+          import pkg from "./package.json" with { type: "json" };
+          import { contentSecurityPolicyPlugin } from "./vite.csp.ts";
+
+          export default defineConfig({
+            define: { __APP_VERSION__: JSON.stringify(pkg.version) },
+            plugins: [react(), tailwindcss(), contentSecurityPolicyPlugin()],
+            resolve: {
+              alias: {
+                "@": path.resolve(import.meta.dirname, "./src"),
+                "next/navigation": path.resolve(import.meta.dirname, "./src/lib/navigation.tsx"),
+                "next/link": path.resolve(import.meta.dirname, "./src/lib/navigation.tsx"),
+                "next/image": path.resolve(import.meta.dirname, "./src/components/ui/AppImage.tsx"),
+              },
+            },
+            server: { port: 5173, strictPort: true },
+            build: { outDir: "dist", emptyOutDir: true },
+          });`;
+          fs.writeFileSync("vite.config.mobile.ts", mobileVite);
+          console.log("Created vite.config.mobile.ts with ./vite.csp.ts extension");
+
+          // 3. Ensure src/main.tsx imports androidBridge at top
+          const mainTsxPath = "src/main.tsx";
+          if (fs.existsSync(mainTsxPath)) {
+            let code = fs.readFileSync(mainTsxPath, "utf8");
+            if (!code.includes("androidBridge")) {
+              code = `import "@capacitor/core";\nimport "./androidBridge";\n` + code;
+              fs.writeFileSync(mainTsxPath, code);
+              console.log("Injected androidBridge import into src/main.tsx");
+            }
           }
-        },
-        {
-          "name": "Set up Java 17",
-          "uses": "actions/setup-java@v4",
-          "with": {
-            "distribution": "temurin",
-            "java-version": "17"
+
+          // 4. Inject floating in-app diagnostic log viewer into index.html
+          const idxPath = "index.html";
+          if (fs.existsSync(idxPath)) {
+            let h = fs.readFileSync(idxPath, "utf8");
+            if (!h.includes("liner-debug-console")) {
+              const debugScript = `<script id="liner-debug-console">
+          (function(){
+            if (window.__linerLogInit) return; window.__linerLogInit = true;
+            var logs = [], errCnt = 0;
+            function add(type, args){
+              var ts = new Date().toTimeString().split(" ")[0];
+              var str = Array.from(args).map(function(x){ try{ return typeof x === "object" ? JSON.stringify(x) : String(x); }catch(e){ return String(x); } }).join(" ");
+              logs.push({ ts: ts, type: type, str: str });
+              if (logs.length > 300) logs.shift();
+              if (type === "error"){ errCnt++; updateBadge(); }
+              updateUI();
+            }
+            var _l = console.log, _w = console.warn, _e = console.error;
+            console.log = function(){ add("info", arguments); _l.apply(console, arguments); };
+            console.warn = function(){ add("warn", arguments); _w.apply(console, arguments); };
+            console.error = function(){ add("error", arguments); _e.apply(console, arguments); };
+            window.addEventListener("error", function(e){ add("error", ["[GlobalErr]", e.message, e.filename + ":" + e.lineno]); });
+            window.addEventListener("unhandledrejection", function(e){ add("error", ["[UnhandledPromise]", e.reason]); });
+            var pill = document.createElement("div");
+            pill.style.cssText = "position:fixed;bottom:78px;right:12px;z-index:9999999;background:rgba(20,20,25,0.92);color:#38bdf8;padding:6px 12px;border-radius:20px;font-family:sans-serif;font-size:12px;font-weight:700;border:1px solid rgba(56,189,248,0.5);box-shadow:0 4px 16px rgba(0,0,0,0.8);cursor:pointer;display:flex;align-items:center;gap:6px;";
+            pill.innerHTML = "<span>🐞 Logs</span><span id=\"_err_cnt\" style=\"background:#ef4444;color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;display:none;\">0</span>";
+            function updateBadge(){ var b = document.getElementById("_err_cnt"); if(b){ b.style.display = errCnt > 0 ? "inline-block" : "none"; b.innerText = errCnt; } }
+            var modal = document.createElement("div");
+            modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(10,12,18,0.97);z-index:99999999;color:#e2e8f0;font-family:monospace;font-size:11px;display:none;flex-direction:column;padding:12px;box-sizing:border-box;";
+            modal.innerHTML = "<div style=\"display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid #334155;\"><strong style=\"color:#38bdf8;font-size:13px;\">Liner Diagnostic Console</strong><div style=\"display:flex;gap:6px;\"><button id=\"_cp_btn\" style=\"background:#2563eb;color:#fff;border:none;padding:5px 9px;border-radius:5px;font-size:11px;cursor:pointer;\">📋 Copy Logs</button><button id=\"_clr_btn\" style=\"background:#475569;color:#fff;border:none;padding:5px 9px;border-radius:5px;font-size:11px;cursor:pointer;\">🧹 Clear</button><button id=\"_cl_btn\" style=\"background:#dc2626;color:#fff;border:none;padding:5px 9px;border-radius:5px;font-size:11px;cursor:pointer;\">✕ Close</button></div></div><div id=\"_diag\" style=\"background:#1e293b;padding:6px;border-radius:4px;margin:8px 0;font-size:10px;line-height:1.4;\"></div><div id=\"_log_list\" style=\"flex:1;overflow-y:auto;background:#090d16;padding:8px;border-radius:4px;word-break:break-all;user-select:text;-webkit-user-select:text;\"><p style=\"color:#64748b;\">Tap any song to see live playback network and error trace here...</p></div>";
+            pill.onclick = function(){
+              modal.style.display = "flex";
+              var c = window.Capacitor, ch = window.CapacitorHttp || c?.Plugins?.CapacitorHttp;
+              var a = document.getElementById("liner-audio") || window.__liner_audio;
+              var d = document.getElementById("_diag");
+              if (d) d.innerHTML = "<b>Capacitor:</b> " + (c ? c.getPlatform() : "Web") + " | <b>CapacitorHttp:</b> " + (ch ? "<span style=\"color:#4ade80;\">READY</span>" : "<span style=\"color:#f87171;\">MISSING</span>") + "<br/><b>Audio:</b> " + (a ? (a.paused ? "paused" : "playing") + " | ready: " + a.readyState + (a.error ? " | <span style=\"color:#f87171;\">ERR:" + a.error.code + "</span>" : "") : "none");
+              updateUI();
+            };
+            function updateUI(){
+              if (modal.style.display !== "flex") return;
+              var el = document.getElementById("_log_list"); if (!el || logs.length === 0) return;
+              el.innerHTML = logs.map(function(l){
+                var col = l.type === "error" ? "#f87171" : l.type === "warn" ? "#fbbf24" : "#94a3b8";
+                return "<div style=\"margin-bottom:3px;border-bottom:1px solid #172033;padding:2px 0;\"><span style=\"color:#64748b;\">" + l.ts + "</span> <span style=\"color:" + col + ";\">[" + l.type.toUpperCase() + "]</span> " + l.str.replace(/</g, "&lt;") + "</div>";
+              }).join("");
+              el.scrollTop = el.scrollHeight;
+            }
+            function initUI(){
+              document.body.appendChild(pill); document.body.appendChild(modal);
+              document.getElementById("_cl_btn").onclick = function(){ modal.style.display = "none"; };
+              document.getElementById("_clr_btn").onclick = function(){ logs = []; errCnt = 0; updateBadge(); var el = document.getElementById("_log_list"); if(el) el.innerHTML = "<p style=\"color:#64748b;\">Logs cleared.</p>"; };
+              document.getElementById("_cp_btn").onclick = function(){
+                var txt = logs.map(function(l){ return l.ts + " [" + l.type.toUpperCase() + "] " + l.str; }).join("\\n");
+                navigator.clipboard.writeText(txt || "No logs recorded yet.").then(function(){
+                  var b = document.getElementById("_cp_btn"); b.innerText = "✅ Copied!"; setTimeout(function(){ b.innerText = "📋 Copy Logs"; }, 2000);
+                }).catch(function(){ alert("Copy permission denied, please select text manually."); });
+              };
+            }
+            if (document.readyState === "loading"){ document.addEventListener("DOMContentLoaded", initUI); } else { initUI(); }
+          })();
+          </script>`;
+              h = h.replace("</body>", debugScript + "\n</body>");
+              fs.writeFileSync(idxPath, h);
+              console.log("Injected floating debug log console into index.html");
+            }
+          }'
+
+      - name: Patch search hooks for null-safety
+        working-directory: upstream-src
+        run: |
+          node -e 'const fs = require("fs"); const path = require("path"); const hooksDir = "src/features/search/hooks"; if (fs.existsSync(hooksDir)) { fs.readdirSync(hooksDir).forEach(f => { const fp = path.join(hooksDir, f); let c = fs.readFileSync(fp, "utf8"); c = c.replace(/setItems\(res\.items\);/g, "setItems(Array.isArray(res?.items) ? res.items : []);"); c = c.replace(/\[items\.length,/g, "[(items || []).length,"); c = c.replace(/res\.items\.filter/g, "(Array.isArray(res?.items) ? res.items : []).filter"); c = c.replace(/tracks\.length/g, "(tracks || []).length"); fs.writeFileSync(fp, c); console.log("Patched search hook:", f); }); }'
+
+      - name: Patch audio player, unmask error toasts & bypass CORS for Android
+        working-directory: upstream-src
+        run: |
+          node -e 'const fs = require("fs"); const path = require("path");
+          // 1. Unmask exact error message in UI toast so user sees root cause on device
+          const pePath = "src/features/player/engine/playerEngine.ts";
+          if (fs.existsSync(pePath)) {
+            let pe = fs.readFileSync(pePath, "utf8");
+            const peTarget = `showToast(translate("player.track_unavailable_title"), "error", {\n      description: track.artists\n        ? \`\${track.title} — \${track.artists}\`\n        : track.title,\n    });`;
+            if (pe.includes(peTarget)) {
+              pe = pe.replace(peTarget, `const _err = info?.message ? " [" + info.message + "]" : "";\n    showToast(translate("player.track_unavailable_title"), "error", {\n      description: \`\${track.title}\${_err}\`,\n    });`);
+              fs.writeFileSync(pePath, pe);
+              console.log("Patched playerEngine.ts: unmasked exact error message in UI toast");
+            }
           }
-        },
-        {
-          "name": "Install pnpm",
-          "uses": "pnpm/action-setup@v4",
-          "with": {
-            "version": 9
+          // 2. Prioritize AAC (itag 140 / 139) over WebM Opus (251) to eliminate Android MEDIA_ELEMENT_ERROR: Format error
+          const iafPath = "src/shared/youtube/innertube/innertubeAudioFormats.ts";
+          if (fs.existsSync(iafPath)) {
+            let iaf = fs.readFileSync(iafPath, "utf8");
+            iaf = iaf.replace(/(?:export\s+)?const\s+PREFERRED_ITAGS\s*=\s*\[[\s\S]*?\];/, "export const PREFERRED_ITAGS = [140, 139, 251, 250, 249];");
+            fs.writeFileSync(iafPath, iaf);
+            console.log("Patched innertubeAudioFormats.ts: prioritized AAC (140, 139)");
           }
-        },
-        {
-          "name": "Clone upstream Liner source",
-          "run": "git clone --depth 1 https://github.com/tryliner/desktop.git upstream-src"
-        },
-        {
-          "name": "Apply overlay files to upstream",
-          "run": "mkdir -p upstream-src/src/android\nif [ -d \"overlay\" ]; then cp -rf overlay/* upstream-src/; fi\nif [ -f \"capacitor.config.json\" ]; then cp -f capacitor.config.json upstream-src/; fi\n"
-        },
-        {
-          "name": "Configure pnpm workspace & install dependencies",
-          "working-directory": "upstream-src",
-          "run": "printf \"packages:\\n  - '.'\\nallowBuilds:\\n  electron-winstaller: true\\n\" > pnpm-workspace.yaml\npnpm install --no-frozen-lockfile\npnpm add -w @capacitor/core@^6.0.0\npnpm add -w -D @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0\n"
-        },
-        {
-          "name": "Ensure mobile config, Android bridge & in-app log viewer",
-          "working-directory": "upstream-src",
-          "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\");\n// 1. Ensure capacitor.config.json has CapacitorHttp enabled\nconst capCfg = {\n  appId: \"com.hkamori.liner\",\n  appName: \"Liner\",\n  webDir: \"dist\",\n  server: { androidScheme: \"https\", cleartext: true },\n  android: { allowMixedContent: true },\n  plugins: { CapacitorHttp: { enabled: true } }\n};\nfs.writeFileSync(\"capacitor.config.json\", JSON.stringify(capCfg, null, 2));\nconsole.log(\"Wrote capacitor.config.json with CapacitorHttp enabled\");\n\n// 2. Ensure vite.config.mobile.ts exists\nif (!fs.existsSync(\"vite.config.mobile.ts\")) {\n  const mobileVite = `import { defineConfig } from \"vite\";\\nimport react from \"@vitejs/plugin-react\";\\nimport tailwindcss from \"@tailwindcss/vite\";\\nimport path from \"path\";\\nimport pkg from \"./package.json\" with { type: \"json\" };\\nimport { contentSecurityPolicyPlugin } from \"./vite.csp.ts\";\\nexport default defineConfig({\\n  define: { __APP_VERSION__: JSON.stringify(pkg.version) },\\n  plugins: [react(), tailwindcss(), contentSecurityPolicyPlugin()],\\n  resolve: {\\n    alias: {\\n      \"@\": path.resolve(import.meta.dirname, \"./src\"),\\n      \"next/navigation\": path.resolve(import.meta.dirname, \"./src/lib/navigation.tsx\"),\\n      \"next/link\": path.resolve(import.meta.dirname, \"./src/lib/navigation.tsx\"),\\n      \"next/image\": path.resolve(import.meta.dirname, \"./src/components/ui/AppImage.tsx\"),\\n    },\\n  },\\n  server: { port: 5173, strictPort: true },\\n  build: { outDir: \"dist\", emptyOutDir: true },\\n});`;\n  fs.writeFileSync(\"vite.config.mobile.ts\", mobileVite);\n  console.log(\"Created vite.config.mobile.ts\");\n}\n\n// 3. Ensure src/main.tsx imports androidBridge at top\nconst mainTsxPath = \"src/main.tsx\";\nif (fs.existsSync(mainTsxPath)) {\n  let code = fs.readFileSync(mainTsxPath, \"utf8\");\n  if (!code.includes(\"androidBridge\")) {\n    code = `import \"@capacitor/core\";\\nimport \"./androidBridge\";\\n` + code;\n    fs.writeFileSync(mainTsxPath, code);\n    console.log(\"Injected androidBridge import into src/main.tsx\");\n  }\n}\n\n// 4. Inject floating in-app diagnostic log viewer into index.html\nconst idxPath = \"index.html\";\nif (fs.existsSync(idxPath)) {\n  let h = fs.readFileSync(idxPath, \"utf8\");\n  if (!h.includes(\"liner-debug-console\")) {\n    const debugScript = `<script id=\"liner-debug-console\">\n(function(){\n  if (window.__linerLogInit) return; window.__linerLogInit = true;\n  var logs = [], errCnt = 0;\n  function add(type, args){\n    var ts = new Date().toTimeString().split(\" \")[0];\n    var str = Array.from(args).map(function(x){ try{ return typeof x === \"object\" ? JSON.stringify(x) : String(x); }catch(e){ return String(x); } }).join(\" \");\n    logs.push({ ts: ts, type: type, str: str });\n    if (logs.length > 300) logs.shift();\n    if (type === \"error\"){ errCnt++; updateBadge(); }\n    updateUI();\n  }\n  var _l = console.log, _w = console.warn, _e = console.error;\n  console.log = function(){ add(\"info\", arguments); _l.apply(console, arguments); };\n  console.warn = function(){ add(\"warn\", arguments); _w.apply(console, arguments); };\n  console.error = function(){ add(\"error\", arguments); _e.apply(console, arguments); };\n  window.addEventListener(\"error\", function(e){ add(\"error\", [\"[GlobalErr]\", e.message, e.filename + \":\" + e.lineno]); });\n  window.addEventListener(\"unhandledrejection\", function(e){ add(\"error\", [\"[UnhandledPromise]\", e.reason]); });\n  var pill = document.createElement(\"div\");\n  pill.style.cssText = \"position:fixed;bottom:78px;right:12px;z-index:9999999;background:rgba(20,20,25,0.92);color:#38bdf8;padding:6px 12px;border-radius:20px;font-family:sans-serif;font-size:12px;font-weight:700;border:1px solid rgba(56,189,248,0.5);box-shadow:0 4px 16px rgba(0,0,0,0.8);cursor:pointer;display:flex;align-items:center;gap:6px;\";\n  pill.innerHTML = \"<span>🐞 Logs</span><span id=\\\"_err_cnt\\\" style=\\\"background:#ef4444;color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;display:none;\\\">0</span>\";\n  function updateBadge(){ var b = document.getElementById(\"_err_cnt\"); if(b){ b.style.display = errCnt > 0 ? \"inline-block\" : \"none\"; b.innerText = errCnt; } }\n  var modal = document.createElement(\"div\");\n  modal.style.cssText = \"position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(10,12,18,0.97);z-index:99999999;color:#e2e8f0;font-family:monospace;font-size:11px;display:none;flex-direction:column;padding:12px;box-sizing:border-box;\";\n  modal.innerHTML = \"<div style=\\\"display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid #334155;\\\"><strong style=\\\"color:#38bdf8;font-size:13px;\\\">Liner Diagnostic Console</strong><div style=\\\"display:flex;gap:6px;\\\"><button id=\\\"_cp_btn\\\" style=\\\"background:#2563eb;color:#fff;border:none;padding:5px 9px;border-radius:5px;font-size:11px;cursor:pointer;\\\">📋 Copy Logs</button><button id=\\\"_clr_btn\\\" style=\\\"background:#475569;color:#fff;border:none;padding:5px 9px;border-radius:5px;font-size:11px;cursor:pointer;\\\">🧹 Clear</button><button id=\\\"_cl_btn\\\" style=\\\"background:#dc2626;color:#fff;border:none;padding:5px 9px;border-radius:5px;font-size:11px;cursor:pointer;\\\">✕ Close</button></div></div><div id=\\\"_diag\\\" style=\\\"background:#1e293b;padding:6px;border-radius:4px;margin:8px 0;font-size:10px;line-height:1.4;\\\"></div><div id=\\\"_log_list\\\" style=\\\"flex:1;overflow-y:auto;background:#090d16;padding:8px;border-radius:4px;word-break:break-all;user-select:text;-webkit-user-select:text;\\\"><p style=\\\"color:#64748b;\\\">Tap any song to see live playback network and error trace here...</p></div>\";\n  pill.onclick = function(){\n    modal.style.display = \"flex\";\n    var c = window.Capacitor, ch = window.CapacitorHttp || c?.Plugins?.CapacitorHttp;\n    var a = document.getElementById(\"liner-audio\") || window.__liner_audio;\n    var d = document.getElementById(\"_diag\");\n    if (d) d.innerHTML = \"<b>Capacitor:</b> \" + (c ? c.getPlatform() : \"Web\") + \" | <b>CapacitorHttp:</b> \" + (ch ? \"<span style=\\\"color:#4ade80;\\\">READY</span>\" : \"<span style=\\\"color:#f87171;\\\">MISSING</span>\") + \"<br/><b>Audio:</b> \" + (a ? (a.paused ? \"paused\" : \"playing\") + \" | ready: \" + a.readyState + (a.error ? \" | <span style=\\\"color:#f87171;\\\">ERR:\" + a.error.code + \"</span>\" : \"\") : \"none\");\n    updateUI();\n  };\n  function updateUI(){\n    if (modal.style.display !== \"flex\") return;\n    var el = document.getElementById(\"_log_list\"); if (!el || logs.length === 0) return;\n    el.innerHTML = logs.map(function(l){\n      var col = l.type === \"error\" ? \"#f87171\" : l.type === \"warn\" ? \"#fbbf24\" : \"#94a3b8\";\n      return \"<div style=\\\"margin-bottom:3px;border-bottom:1px solid #172033;padding:2px 0;\\\"><span style=\\\"color:#64748b;\\\">\" + l.ts + \"</span> <span style=\\\"color:\" + col + \";\\\">[\" + l.type.toUpperCase() + \"]</span> \" + l.str.replace(/</g, \"&lt;\") + \"</div>\";\n    }).join(\"\");\n    el.scrollTop = el.scrollHeight;\n  }\n  function initUI(){\n    document.body.appendChild(pill); document.body.appendChild(modal);\n    document.getElementById(\"_cl_btn\").onclick = function(){ modal.style.display = \"none\"; };\n    document.getElementById(\"_clr_btn\").onclick = function(){ logs = []; errCnt = 0; updateBadge(); var el = document.getElementById(\"_log_list\"); if(el) el.innerHTML = \"<p style=\\\"color:#64748b;\\\">Logs cleared.</p>\"; };\n    document.getElementById(\"_cp_btn\").onclick = function(){\n      var txt = logs.map(function(l){ return l.ts + \" [\" + l.type.toUpperCase() + \"] \" + l.str; }).join(\"\\n\");\n      navigator.clipboard.writeText(txt || \"No logs recorded yet.\").then(function(){\n        var b = document.getElementById(\"_cp_btn\"); b.innerText = \"✅ Copied!\"; setTimeout(function(){ b.innerText = \"📋 Copy Logs\"; }, 2000);\n      }).catch(function(){ alert(\"Copy permission denied, please select text manually.\"); });\n    };\n  }\n  if (document.readyState === \"loading\"){ document.addEventListener(\"DOMContentLoaded\", initUI); } else { initUI(); }\n})();\n</script>`;\n    h = h.replace(\"</body>\", debugScript + \"\\n</body>\");\n    fs.writeFileSync(idxPath, h);\n    console.log(\"Injected floating debug log console into index.html\");\n  }\n}'"
-        },
-        {
-          "name": "Patch search hooks for null-safety",
-          "working-directory": "upstream-src",
-          "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\"); const hooksDir = \"src/features/search/hooks\"; if (fs.existsSync(hooksDir)) { fs.readdirSync(hooksDir).forEach(f => { const fp = path.join(hooksDir, f); let c = fs.readFileSync(fp, \"utf8\"); c = c.replace(/setItems\\(res\\.items\\);/g, \"setItems(Array.isArray(res?.items) ? res.items : []);\"); c = c.replace(/\\[items\\.length,/g, \"[(items || []).length,\"); c = c.replace(/res\\.items\\.filter/g, \"(Array.isArray(res?.items) ? res.items : []).filter\"); c = c.replace(/tracks\\.length/g, \"(tracks || []).length\"); fs.writeFileSync(fp, c); console.log(\"Patched search hook:\", f); }); }'"
-        },
-        {
-          "name": "Patch audio player, unmask error toasts & bypass CORS for Android",
-          "working-directory": "upstream-src",
-          "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\");\n// 1. Unmask exact error message in UI toast so user sees root cause on device\nconst pePath = \"src/features/player/engine/playerEngine.ts\";\nif (fs.existsSync(pePath)) {\n  let pe = fs.readFileSync(pePath, \"utf8\");\n  const peTarget = `showToast(translate(\"player.track_unavailable_title\"), \"error\", {\\n      description: track.artists\\n        ? \\`\\${track.title} — \\${track.artists}\\`\\n        : track.title,\\n    });`;\n  if (pe.includes(peTarget)) {\n    pe = pe.replace(peTarget, `const _err = info?.message ? \" [\" + info.message + \"]\" : \"\";\\n    showToast(translate(\"player.track_unavailable_title\"), \"error\", {\\n      description: \\`\\${track.title}\\${_err}\\`,\\n    });`);\n    fs.writeFileSync(pePath, pe);\n    console.log(\"Patched playerEngine.ts: unmasked exact error message in UI toast\");\n  }\n}\n// 2. Prioritize AAC (itag 140 / 139) over WebM Opus (251) to eliminate Android MEDIA_ELEMENT_ERROR: Format error\nconst iafPath = \"src/shared/youtube/innertube/innertubeAudioFormats.ts\";\nif (fs.existsSync(iafPath)) {\n  let iaf = fs.readFileSync(iafPath, \"utf8\");\n  iaf = iaf.replace(/(?:export\\s+)?const\\s+PREFERRED_ITAGS\\s*=\\s*\\[[\\s\\S]*?\\];/, \"export const PREFERRED_ITAGS = [140, 139, 251, 250, 249];\");\n  fs.writeFileSync(iafPath, iaf);\n  console.log(\"Patched innertubeAudioFormats.ts: prioritized AAC (140, 139)\");\n}\nconst srPath = \"src/features/player/engine/streamResolver.ts\";\nif (fs.existsSync(srPath)) {\n  let sr = fs.readFileSync(srPath, \"utf8\");\n  sr = sr.replace(/resolveDirectAudioStream\\(videoId, \\{ signal \\}\\)/g, \"resolveDirectAudioStream(videoId, { signal, preferredCodec: \\\"aac\\\" })\");\n  fs.writeFileSync(srPath, sr);\n  console.log(\"Patched streamResolver.ts: preferredCodec = aac\");\n}\n// 3. Remove audio.crossOrigin = \"anonymous\" so <audio> is not blocked by CORS on googlevideo streams\nconst prPath = \"src/features/player/engine/playerRuntime.ts\";\nif (fs.existsSync(prPath)) {\n  let pr = fs.readFileSync(prPath, \"utf8\");\n  pr = pr.replace(/audio\\.crossOrigin\\s*=\\s*\"anonymous\";/g, \"/* audio.crossOrigin omitted for Android WebView */\");\n  fs.writeFileSync(prPath, pr);\n  console.log(\"Patched playerRuntime.ts: removed audio.crossOrigin CORS requirement\");\n}\n// 4. Put VISIONOS and ANDROID_VR first in PLAYBACK_PROFILES (direct stream, no cipher, no JS player)\nconst ppPath = \"src/shared/youtube/innertube/playbackProfiles.ts\";\nif (fs.existsSync(ppPath)) {\n  let pp = fs.readFileSync(ppPath, \"utf8\");\n  pp = pp.replace(/export const PLAYBACK_PROFILES: readonly InnertubeProfile\\[\\] = \\[\\s*TV_PROFILE,\\s*VISIONOS_PROFILE,\\s*ANDROID_VR_PROFILE,\\s*\\];/g, \"export const PLAYBACK_PROFILES: readonly InnertubeProfile[] = [ VISIONOS_PROFILE, ANDROID_VR_PROFILE, TV_PROFILE ];\");\n  fs.writeFileSync(ppPath, pp);\n  console.log(\"Patched playbackProfiles.ts: prioritized VISIONOS and ANDROID_VR\");\n}\n// 5. Skip WebRemix without desktop PoToken\nconst iaPath = \"src/shared/youtube/innertube/innertubeAudio.ts\";\nif (fs.existsSync(iaPath)) {\n  let ia = fs.readFileSync(iaPath, \"utf8\");\n  ia = ia.replace(/if \\(!options\\.profiles && Date\\.now\\(\\) >= webRemixRetryAt\\) \\{/g, \"if (!options.profiles && Date.now() >= webRemixRetryAt && typeof window !== \\\"undefined\\\" && Boolean((window as any).linerElectron?.mintPoToken)) {\");\n  fs.writeFileSync(iaPath, ia);\n  console.log(\"Patched innertubeAudio.ts: bypassed WebRemix on mobile\");\n}\n// 6. Rewrite streamProbe to be a safe no-op (avoids CORS range request failure on googlevideo CDN)\nconst spPath = \"src/shared/youtube/innertube/streamProbe.ts\";\nif (fs.existsSync(spPath)) {\n  fs.writeFileSync(spPath, `export async function assertStreamReachable(_url: string, _contentLength: number | undefined, _signal?: AbortSignal): Promise<void> { return; }\\nexport function isStreamRefused(_error?: unknown): boolean { return false; }\\n`);\n  console.log(\"Patched streamProbe.ts: streamProbe is now non-fatal\");\n}\n// 7. Direct native CapacitorHttp routing in postInnertube with Origin/Referer bypass\nconst icPath = \"src/shared/youtube/innertube/innertubeClient.ts\";\nif (fs.existsSync(icPath)) {\n  let ic = fs.readFileSync(icPath, \"utf8\");\n  const target = \"    try {\\n      return await fetch(url, {\";\n  if (ic.includes(target)) {\n    ic = ic.replace(target, `    const capHttp = typeof window !== \"undefined\" && ((window as any).CapacitorHttp || (window as any).Capacitor?.Plugins?.CapacitorHttp);\\n    if (capHttp && typeof capHttp.request === \"function\") {\\n      try {\\n        const capRes = await capHttp.request({\\n          url,\\n          method: \"POST\",\\n          headers: { ...buildHeaders(profile, visitorData, authorization), Origin: profile.origin, Referer: profile.origin + \"/\" },\\n          data: payload,\\n        });\\n        const bodyText = typeof capRes.data === \"string\" ? capRes.data : JSON.stringify(capRes.data ?? {});\\n        return new Response(bodyText, { status: capRes.status, headers: new Headers({ \"content-type\": \"application/json\" }) });\\n      } catch (e) {\\n        console.warn(\"[CapacitorHttp Innertube] native request fallback:\", e);\\n      }\\n    }\\n    try {\\n      return await fetch(url, {`);\n    fs.writeFileSync(icPath, ic);\n    console.log(\"Patched innertubeClient.ts: added direct native CapacitorHttp routing\");\n  }\n}\n// 8. Fallback to proposedTrack for imported Spotify tracks\nconst ysPath = \"src/features/player/engine/youtubeStandIn.ts\";\nif (fs.existsSync(ysPath)) {\n  let ys = fs.readFileSync(ysPath, \"utf8\");\n  const ysTarget = \"if (outcome.status !== \\\"approved\\\") return null;\\n  const videoId = toVideoId(outcome.track.id);\";\n  if (ys.includes(ysTarget)) {\n    ys = ys.replace(ysTarget, `const matched = outcome.status === \"approved\" ? outcome.track : (outcome as any).proposedTrack;\\n  if (!matched) return null;\\n  const videoId = toVideoId(matched.id);`);\n    fs.writeFileSync(ysPath, ys);\n    console.log(\"Patched youtubeStandIn.ts: fallback to proposedTrack for imported tracks\");\n  }\n}'"
-        },
-        {
-          "name": "Build web bundle with mobile config",
-          "working-directory": "upstream-src",
-          "run": "pnpm exec vite build --config vite.config.mobile.ts"
-        },
-        {
-          "name": "Capacitor add Android & sync",
-          "working-directory": "upstream-src",
-          "run": "npx cap add android || true\nnpx cap sync android\n"
-        },
-        {
-          "name": "Configure Android Manifest, WebView media settings & Chrome remote debugging",
-          "working-directory": "upstream-src/android",
-          "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\");\n// 1. AndroidManifest.xml permissions\nconst p = \"app/src/main/AndroidManifest.xml\";\nif (fs.existsSync(p)) {\n  let xml = fs.readFileSync(p, \"utf8\");\n  const perms = \"\\n    <uses-permission android:name=\\\"android.permission.INTERNET\\\" />\\n    <uses-permission android:name=\\\"android.permission.ACCESS_NETWORK_STATE\\\" />\\n    <uses-permission android:name=\\\"android.permission.WAKE_LOCK\\\" />\\n    <uses-permission android:name=\\\"android.permission.FOREGROUND_SERVICE\\\" />\\n    <uses-permission android:name=\\\"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK\\\" />\";\n  if (!xml.includes(\"INTERNET\")) xml = xml.replace(\"<application\", perms + \"\\n    <application\");\n  if (!xml.includes(\"usesCleartextTraffic\")) xml = xml.replace(\"<application\", \"<application android:usesCleartextTraffic=\\\"true\\\"\");\n  fs.writeFileSync(p, xml);\n  console.log(\"AndroidManifest.xml updated\");\n}\n// 2. Patch MainActivity.java: enable Chrome DevTools remote debugging & media autoplay settings\nfunction findMain(dir) {\n  for (const item of fs.readdirSync(dir)) {\n    const full = path.join(dir, item);\n    if (fs.statSync(full).isDirectory()) {\n      const res = findMain(full);\n      if (res) return res;\n    } else if (item === \"MainActivity.java\") return full;\n  }\n  return null;\n}\nconst mainJavaPath = findMain(\"app/src/main/java\");\nif (mainJavaPath && fs.existsSync(mainJavaPath)) {\n  let code = fs.readFileSync(mainJavaPath, \"utf8\");\n  code = code.replace(/public class MainActivity extends BridgeActivity\\s*\\{[^}]*\\}/s, `public class MainActivity extends BridgeActivity {\\n    @Override\\n    public void onCreate(android.os.Bundle savedInstanceState) {\\n        super.onCreate(savedInstanceState);\\n        android.webkit.WebView.setWebContentsDebuggingEnabled(true);\\n        if (this.bridge != null && this.bridge.getWebView() != null) {\\n            android.webkit.WebSettings s = this.bridge.getWebView().getSettings();\\n            s.setMediaPlaybackRequiresUserGesture(false);\\n            s.setAllowFileAccess(true);\\n            s.setDomStorageEnabled(true);\\n            s.setDatabaseEnabled(true);\\n            s.setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);\\n        }\\n    }\\n\\n    @Override\\n    public void onResume() {\\n        super.onResume();\\n        if (this.bridge != null && this.bridge.getWebView() != null) {\\n            this.bridge.getWebView().getSettings().setMediaPlaybackRequiresUserGesture(false);\\n        }\\n    }\\n}`);\n  fs.writeFileSync(mainJavaPath, code);\n  console.log(\"MainActivity.java patched for media playback & Chrome remote debugging:\", mainJavaPath);\n}'"
-        },
-        {
-          "name": "Build Debug APK via Gradle",
-          "working-directory": "upstream-src/android",
-          "run": "chmod +x gradlew && ./gradlew assembleDebug --no-daemon"
-        },
-        {
-          "name": "Upload APK Artifact",
-          "uses": "actions/upload-artifact@v4",
-          "with": {
-            "name": "liner-debug-apk",
-            "path": "upstream-src/android/app/build/outputs/apk/debug/app-debug.apk",
-            "if-no-files-found": "error"
+          const srPath = "src/features/player/engine/streamResolver.ts";
+          if (fs.existsSync(srPath)) {
+            let sr = fs.readFileSync(srPath, "utf8");
+            sr = sr.replace(/resolveDirectAudioStream\(videoId, \{ signal \}\)/g, "resolveDirectAudioStream(videoId, { signal, preferredCodec: \"aac\" })");
+            fs.writeFileSync(srPath, sr);
+            console.log("Patched streamResolver.ts: preferredCodec = aac");
           }
-        }
-      ]
-    }
-  }
-}
+          // 3. Remove audio.crossOrigin = "anonymous" so <audio> is not blocked by CORS on googlevideo streams
+          const prPath = "src/features/player/engine/playerRuntime.ts";
+          if (fs.existsSync(prPath)) {
+            let pr = fs.readFileSync(prPath, "utf8");
+            pr = pr.replace(/audio\.crossOrigin\s*=\s*"anonymous";/g, "/* audio.crossOrigin omitted for Android WebView */");
+            fs.writeFileSync(prPath, pr);
+            console.log("Patched playerRuntime.ts: removed audio.crossOrigin CORS requirement");
+          }
+          // 4. Put VISIONOS and ANDROID_VR first in PLAYBACK_PROFILES (direct stream, no cipher, no JS player)
+          const ppPath = "src/shared/youtube/innertube/playbackProfiles.ts";
+          if (fs.existsSync(ppPath)) {
+            let pp = fs.readFileSync(ppPath, "utf8");
+            pp = pp.replace(/export const PLAYBACK_PROFILES: readonly InnertubeProfile\[\] = \[\s*TV_PROFILE,\s*VISIONOS_PROFILE,\s*ANDROID_VR_PROFILE,\s*\];/g, "export const PLAYBACK_PROFILES: readonly InnertubeProfile[] = [ VISIONOS_PROFILE, ANDROID_VR_PROFILE, TV_PROFILE ];");
+            fs.writeFileSync(ppPath, pp);
+            console.log("Patched playbackProfiles.ts: prioritized VISIONOS and ANDROID_VR");
+          }
+          // 5. Skip WebRemix without desktop PoToken
+          const iaPath = "src/shared/youtube/innertube/innertubeAudio.ts";
+          if (fs.existsSync(iaPath)) {
+            let ia = fs.readFileSync(iaPath, "utf8");
+            ia = ia.replace(/if \(!options\\.profiles && Date\\.now\\(\\) >= webRemixRetryAt\\) \{/g, "if (!options.profiles && Date.now() >= webRemixRetryAt && typeof window !== \"undefined\" && Boolean((window as any).linerElectron?.mintPoToken)) {");
+            fs.writeFileSync(iaPath, ia);
+            console.log("Patched innertubeAudio.ts: bypassed WebRemix on mobile");
+          }
+          // 6. Rewrite streamProbe to export both assertStreamReachable and isStreamRefused safely
+          const spPath = "src/shared/youtube/innertube/streamProbe.ts";
+          if (fs.existsSync(spPath)) {
+            fs.writeFileSync(spPath, `export async function assertStreamReachable(_url: string, _contentLength: number | undefined, _signal?: AbortSignal): Promise<void> { return; }\nexport function isStreamRefused(_error?: unknown): boolean { return false; }\n`);
+            console.log("Patched streamProbe.ts: exported assertStreamReachable and isStreamRefused");
+          }
+          // 7. Direct native CapacitorHttp routing in postInnertube with Origin/Referer bypass
+          const icPath = "src/shared/youtube/innertube/innertubeClient.ts";
+          if (fs.existsSync(icPath)) {
+            let ic = fs.readFileSync(icPath, "utf8");
+            const target = "    try {\n      return await fetch(url, {";
+            if (ic.includes(target)) {
+              ic = ic.replace(target, `    const capHttp = typeof window !== "undefined" && ((window as any).CapacitorHttp || (window as any).Capacitor?.Plugins?.CapacitorHttp);\n    if (capHttp && typeof capHttp.request === "function") {\n      try {\n        const capRes = await capHttp.request({\n          url,\n          method: "POST",\n          headers: { ...buildHeaders(profile, visitorData, authorization), Origin: profile.origin, Referer: profile.origin + "/" },\n          data: payload,\n        });\n        const bodyText = typeof capRes.data === "string" ? capRes.data : JSON.stringify(capRes.data ?? {});\n        return new Response(bodyText, { status: capRes.status, headers: new Headers({ "content-type": "application/json" }) });\n      } catch (e) {\n        console.warn("[CapacitorHttp Innertube] native request fallback:", e);\n      }\n    }\n    try {\n      return await fetch(url, {`);
+              fs.writeFileSync(icPath, ic);
+              console.log("Patched innertubeClient.ts: added direct native CapacitorHttp routing");
+            }
+          }
+          // 8. Fallback to proposedTrack for imported Spotify tracks
+          const ysPath = "src/features/player/engine/youtubeStandIn.ts";
+          if (fs.existsSync(ysPath)) {
+            let ys = fs.readFileSync(ysPath, "utf8");
+            const ysTarget = "if (outcome.status !== \"approved\") return null;\n  const videoId = toVideoId(outcome.track.id);";
+            if (ys.includes(ysTarget)) {
+              ys = ys.replace(ysTarget, `const matched = outcome.status === \"approved\" ? outcome.track : (outcome as any).proposedTrack;\n  if (!matched) return null;\n  const videoId = toVideoId(matched.id);`);
+              fs.writeFileSync(ysPath, ys);
+              console.log("Patched youtubeStandIn.ts: fallback to proposedTrack for imported tracks");
+            }
+          }'
+
+      - name: Build web bundle with mobile config
+        working-directory: upstream-src
+        run: pnpm exec vite build --config vite.config.mobile.ts
+
+      - name: Capacitor add Android & sync
+        working-directory: upstream-src
+        run: |
+          npx cap add android || true
+          npx cap sync android
+
+      - name: Configure Android Manifest, WebView media settings & Chrome remote debugging
+        working-directory: upstream-src/android
+        run: |
+          node -e 'const fs = require("fs"); const path = require("path");
+          // 1. AndroidManifest.xml permissions
+          const p = "app/src/main/AndroidManifest.xml";
+          if (fs.existsSync(p)) {
+            let xml = fs.readFileSync(p, "utf8");
+            const perms = "\n    <uses-permission android:name=\"android.permission.INTERNET\" />\n    <uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\" />\n    <uses-permission android:name=\"android.permission.WAKE_LOCK\" />\n    <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE\" />\n    <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK\" />";
+            if (!xml.includes("INTERNET")) xml = xml.replace("<application", perms + "\n    <application");
+            if (!xml.includes("usesCleartextTraffic")) xml = xml.replace("<application", "<application android:usesCleartextTraffic=\"true\"");
+            fs.writeFileSync(p, xml);
+            console.log("AndroidManifest.xml updated");
+          }
+          // 2. Patch MainActivity.java: enable Chrome DevTools remote debugging & media autoplay settings
+          function findMain(dir) {
+            for (const item of fs.readdirSync(dir)) {
+              const full = path.join(dir, item);
+              if (fs.statSync(full).isDirectory()) {
+                const res = findMain(full);
+                if (res) return res;
+              } else if (item === "MainActivity.java") return full;
+            }
+            return null;
+          }
+          const mainJavaPath = findMain("app/src/main/java");
+          if (mainJavaPath && fs.existsSync(mainJavaPath)) {
+            let code = fs.readFileSync(mainJavaPath, "utf8");
+            code = code.replace(/public class MainActivity extends BridgeActivity\s*\{[^}]*\}/s, `public class MainActivity extends BridgeActivity {\n    @Override\n    public void onCreate(android.os.Bundle savedInstanceState) {\n        super.onCreate(savedInstanceState);\n        android.webkit.WebView.setWebContentsDebuggingEnabled(true);\n        if (this.bridge != null && this.bridge.getWebView() != null) {\n            android.webkit.WebSettings s = this.bridge.getWebView().getSettings();\n            s.setMediaPlaybackRequiresUserGesture(false);\n            s.setAllowFileAccess(true);\n            s.setDomStorageEnabled(true);\n            s.setDatabaseEnabled(true);\n            s.setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);\n        }\n    }\n\n    @Override\n    public void onResume() {\n        super.onResume();\n        if (this.bridge != null && this.bridge.getWebView() != null) {\n            this.bridge.getWebView().getSettings().setMediaPlaybackRequiresUserGesture(false);\n        }\n    }\n}`);
+            fs.writeFileSync(mainJavaPath, code);
+            console.log("MainActivity.java patched for media playback & Chrome remote debugging:", mainJavaPath);
+          }'
+
+      - name: Build Debug APK via Gradle
+        working-directory: upstream-src/android
+        run: chmod +x gradlew && ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: liner-debug-apk
+          path: upstream-src/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
