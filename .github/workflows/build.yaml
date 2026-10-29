@@ -242,7 +242,7 @@ jobs:
           // 6. Rewrite streamProbe to export both assertStreamReachable and isStreamRefused safely
           const spPath = "src/shared/youtube/innertube/streamProbe.ts";
           if (fs.existsSync(spPath)) {
-            fs.writeFileSync(spPath, "export async function assertStreamReachable(_url: string, _contentLength: number | undefined, _signal?: AbortSignal): Promise<void> { return; }\nexport function isStreamRefused(_error?: unknown): boolean { return false; }\n");
+            fs.writeFileSync(spPath, `export async function assertStreamReachable(_url: string, _contentLength: number | undefined, _signal?: AbortSignal): Promise<void> { return; }\nexport function isStreamRefused(_error?: unknown): boolean { return false; }\n`);
             console.log("Patched streamProbe.ts: exported assertStreamReachable and isStreamRefused");
           }
           // 7. Direct native CapacitorHttp routing in postInnertube with Origin/Referer bypass
@@ -262,12 +262,11 @@ jobs:
             let ys = fs.readFileSync(ysPath, "utf8");
             const ysTarget = "if (outcome.status !== \"approved\") return null;\n  const videoId = toVideoId(outcome.track.id);";
             if (ys.includes(ysTarget)) {
-              ys = ys.replace(ysTarget, "const matched = outcome.status === \"approved\" ? outcome.track : (outcome as any).proposedTrack;\n  if (!matched) return null;\n  const videoId = toVideoId(matched.id);");
+              ys = ys.replace(ysTarget, `const matched = outcome.status === \"approved\" ? outcome.track : (outcome as any).proposedTrack;\n  if (!matched) return null;\n  const videoId = toVideoId(matched.id);`);
               fs.writeFileSync(ysPath, ys);
               console.log("Patched youtubeStandIn.ts: fallback to proposedTrack for imported tracks");
             }
-          }
-          console.log("All audio and playback patches applied successfully.");'
+          }'
 
       - name: Build web bundle with mobile config
         working-directory: upstream-src
